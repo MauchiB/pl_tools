@@ -7,7 +7,7 @@ from typing import Union
 
 def clean_zero_in_labels(outputs:Union[list[dict], dict], pad_token_id=0) -> tuple[torch.Tensor, torch.Tensor]:
         outputs = [f for f in outputs if f['labels'].numel() > 0]
-        logits = torch.cat([f['logits'].argmax(-1) for f in outputs], 0)
+        logits = torch.cat([f['logits'] for f in outputs], 0)
         labels = torch.cat([f['labels'] for f in outputs], 0)
 
         labels = torch.where(labels == -100, torch.tensor(pad_token_id, device=labels.device), labels)
@@ -77,8 +77,9 @@ class VisualizationTextCallback(pl.Callback):
         self.wandb_colums = ['epoch', 'step', 'generate', 'target']
 
 
-    def _decode_text(self, outputs:list[dict]) -> tuple[list[str], list[str]]:
-        logits, labels = clean_zero_in_labels(outputs=outputs, pad_token_id=self.cfg.tokenizer.pad_token_id)
+    def _decode_text(self, pl_module, name:str, sample=False) -> tuple[list[str], list[str]]:
+
+        logits, labels = self._get_outputs(pl_module, name, sample)
     
         decode_labels = self.cfg.tokenizer.batch_decode(labels, skip_special_tokens=True)
         decode_logits = self.cfg.tokenizer.batch_decode(logits, skip_special_tokens=True)
@@ -108,20 +109,21 @@ class VisualizationTextCallback(pl.Callback):
                     break
 
             outputs = selected_samples
+
+        logits, labels = clean_zero_in_labels(outputs=outputs, pad_token_id=self.cfg.tokenizer.pad_token_id)
                     
-        return outputs
+        return logits, labels
     
     
     def _text_metric_compute(self, pl_module, name:str) -> None:
-        outputs = self._get_outputs(pl_module=pl_module, name=name, sample=False)
-        decode_logits, decode_labels = self._decode_text(outputs=outputs)
+        decode_logits, decode_labels = self._decode_text(pl_module=pl_module, name=name, sample=False)
         pl_module._log_step(decode_logits, decode_labels, name=name)
 
 
     def _log_sample_text(self, trainer, pl_module, name:str):
-        outputs = self._get_outputs(pl_module=pl_module, name=name, sample=True)
-        decode_logits, decode_labels = self._decode_text(outputs=outputs)
+        decode_logits, decode_labels = self._decode_text(pl_module=pl_module, name=name, sample=True)
         self._log_text(decode_logits=decode_logits, decode_labels=decode_labels, trainer=trainer, name=name)
+    
     
     
     def _log_text(self, decode_logits:list[str], decode_labels:list[str], trainer, name) -> None:

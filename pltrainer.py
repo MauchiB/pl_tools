@@ -4,12 +4,17 @@ from typing import Union, Any
 
 
 class Config:
-    def __init__(self, model, tokenizer, metrics_dict:dict={},
-                freeze:Union[None, int, list, tuple]=None, label_name:str='label',
-                loss_fn=None, optimizer=None,
-                lr_scheduler=None,
-                lr_interval:str='step',
+    def __init__(self, 
+                model, 
+                tokenizer,
+                optimizer_dict:dict,
+                loss_fn: Any = None,
+                metrics_dict:dict={},
+                freeze:Union[None, int, list, tuple]=None, 
+                label_name:str='label',
+                num_batch_to_save=1
                 ):
+        
         super().__init__()
 
         self.model = model
@@ -17,23 +22,13 @@ class Config:
         self.freeze = freeze
         self.label_name = label_name
         self.loss_fn = loss_fn
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-        self.interval = lr_interval
+        self.optimizer_dict = optimizer_dict
         self.metrics_dict = metrics_dict
+        self.num_batch_to_save = num_batch_to_save
 
-        self._init_param()
+
         self._requires_text()
 
-
-    def _init_param(self):
-        self.optimizer_dict = {'optimizer':self.optimizer}
-        if self.lr_scheduler:
-            self.optimizer_dict['lr_scheduler'] = {
-                'scheduler':self.lr_scheduler,
-                'interval':self.interval
-                }
-            
     def _requires_text(self):
         if any([i.requires_text for i in self.metrics_dict.values()]):
             self.requires_text = True
@@ -41,7 +36,6 @@ class Config:
             
     
     
-
 
 
 
@@ -55,7 +49,8 @@ class CustomModel(pl.LightningModule):
         self.metrics_train = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
         self.metrics_valid = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
         self.metrics_test = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
-
+        
+        self.train_outputs = []
         self.valid_outputs = []
         self.test_outputs = []
 
@@ -159,11 +154,10 @@ class CustomModel(pl.LightningModule):
 
     def _get_loss(self, outputs, logits, labels):
         if hasattr(outputs, 'loss'):
-            
             loss = outputs.loss
 
             if loss is None:
-                raise ValueError(f'outputs.logits return {type(loss)}')
+                raise ValueError(f'outputs.logits return {type(loss)} / type of outputs is {type(outputs)}')
 
         elif hasattr(self.cfg, 'loss_fn'):
             loss = self.cfg.loss_fn(logits, labels)
@@ -176,6 +170,17 @@ class CustomModel(pl.LightningModule):
         
 
         return loss
+    
+    def _save_results(self, name, **kwargs):
+        if name == 'TEST':
+            self.test_outputs.append(kwargs)
+        elif name == 'VALID':
+            self.valid_outputs.append(kwargs)
+        elif name == 'TRAIN':
+            self.train_outputs.append(kwargs)
+        else:
+            raise ValueError(f'name is {name}')
+        
             
 
 
@@ -183,9 +188,9 @@ class CustomModel(pl.LightningModule):
         x = self.model(**x)
         return x
 
-    def _step(self, batch, name:str):
+    def _step(self, batch, name:str, batch_idx:int):
         param, labels = self._get_param(batch)
-
+          
         outputs = self(param)
 
         outputs, logits = self._get_outputs(outputs)
@@ -193,29 +198,34 @@ class CustomModel(pl.LightningModule):
         loss = self._get_loss(outputs=outputs, logits=logits, labels=labels)
 
 
-        if self.cfg.requires_text:
-    
-            if name == 'VALID':
-                self.valid_outputs.append({'logits':logits.detach().cpu(), 'labels':labels.detach().cpu()})
-            if name == 'TEST':
-                self.test_outputs.append({'logits':logits.detach().cpu(), 'labels':labels.detach().cpu()})
+        if self.cfg.num_batch_to_save < batch_idx:
+            self._save_results(name=name,
+                               logits=logits.argmax(-1).detach().cpu(),
+                               labels=labels.detach().cpu()
+                               )
 
         return loss, logits, labels
 
 
     def training_step(self, batch, batch_idx):
-        loss, outputs, labels = self._step(batch, name='TRAIN')
+        loss, outputs, labels = self._step(batch, name='TRAIN', batch_idx=batch_idx)
+
         self._log_step(outputs=outputs, labels=labels, name='TRAIN', loss=loss)
+
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss, outputs, labels = self._step(batch, name='VALID')
+        loss, outputs, labels = self._step(batch, name='VALID', batch_idx=batch_idx)
+
         self._log_step(outputs=outputs, labels=labels, name='VALID', loss=loss)
+
         return loss
 
     def test_step(self, batch, batch_idx):
-        loss, outputs, labels = self._step(batch, name='TEST')
+        loss, outputs, labels = self._step(batch, name='TEST', batch_idx=batch_idx)
+
         self._log_step(outputs=outputs, labels=labels, name='TEST', loss=loss)
+
         return loss
 
     def predict_step(self, batch, batch_idx):
