@@ -1,18 +1,20 @@
 import pytorch_lightning as pl
 import torch
-from typing import Union, Any
+from typing import Union, Any, List, Dict
+import inspect
 
 
 class Config:
     def __init__(self, 
                 model, 
                 tokenizer,
-                optimizer_dict:dict,
+                optimizer_dict:Dict,
                 loss_fn: Any = None,
-                metrics_dict:dict={},
+                metrics_dict:Dict={},
                 freeze:Union[None, int, list, tuple]=None, 
                 label_name:str='label',
-                num_batch_to_save=1
+                num_batch_to_save=1,
+                input_names:List=None
                 ):
         
         super().__init__()
@@ -25,6 +27,7 @@ class Config:
         self.optimizer_dict = optimizer_dict
         self.metrics_dict = metrics_dict
         self.num_batch_to_save = num_batch_to_save
+        self.input_names=input_names
 
 
         self._requires_text()
@@ -122,8 +125,13 @@ class CustomModel(pl.LightningModule):
 
 
     def _get_param(self, batch:dict) -> tuple:
+        if self.cfg.input_names:
+            annot_keys = self.cfg.input_names
+        else:
+            forward = self.model.__class__.forward
+            annot_keys = list(inspect.signature(forward).parameters.keys())
+   
 
-        annot_keys = self.model.forward.__annotations__.keys()
         param = {k:v for k,v in batch.items() if k in annot_keys}
         labels = batch[self.cfg.label_name]
 
