@@ -3,15 +3,8 @@ import torch
 import random
 import gc
 from typing import Union
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
-
-def clean_zero_in_labels(outputs:Union[list[dict], dict], pad_token_id=0) -> tuple[torch.Tensor, torch.Tensor]:
-        outputs = [f for f in outputs if f['labels'].numel() > 0]
-        logits = torch.cat([f['logits'] for f in outputs], 0)
-        labels = torch.cat([f['labels'] for f in outputs], 0)
-
-        labels = torch.where(labels == -100, torch.tensor(pad_token_id, device=labels.device), labels)
-        return logits, labels
 
 
 
@@ -45,7 +38,7 @@ class VisualizationConsoleCallback(pl.Callback):
 
         print(output_str)
 
-
+    
     def on_train_epoch_end(self, trainer, pl_module):
         if getattr(trainer, "sanity_checking", False):
             return  # пропускаем печать во время sanity check
@@ -67,116 +60,83 @@ class VisualizationConsoleCallback(pl.Callback):
 
 
 class VisualizationTextCallback(pl.Callback):
-    def __init__(self, cfg, num_texts=3):
+    def __init__(self, cfg, num_step_to_log=100, num_texts=3):
         super().__init__()
 
         self.cfg = cfg
+        self.num_step_to_log = num_step_to_log
         self.num_texts = num_texts
 
-        self.wandb_table = []
-        self.wandb_colums = ['epoch', 'step', 'generate', 'target']
 
 
-    def _decode_text(self, pl_module, name:str, sample=False) -> tuple[list[str], list[str]]:
-
-        logits, labels = self._get_outputs(pl_module, name, sample)
-    
-        decode_labels = self.cfg.tokenizer.batch_decode(labels, skip_special_tokens=True)
+    def decode_text(self, logits, labels) -> tuple[list[str], list[str]]:
         decode_logits = self.cfg.tokenizer.batch_decode(logits, skip_special_tokens=True)
-
+        decode_labels = self.cfg.tokenizer.batch_decode(labels, skip_special_tokens=True)
         return decode_logits, decode_labels
     
-    def _get_outputs(self, pl_module, name:str, sample:bool=False) -> dict:
-        outputs = pl_module.valid_outputs if name == 'VALID' else pl_module.test_outputs
 
-        if sample and outputs:
-            selected_samples = []
-            
-            for f in outputs:
-                
-                batch_size = f['labels'].size(0)
 
-                for i in range(batch_size):
-                    selected_samples.append({
-                        'logits':f['logits'][i:i+1],
-                        'labels':f['labels'][i:i+1],
-                    })
+    def sampling(self, outputs):
+        selected_samples = random.sample(outputs, self.num_texts)
+        return selected_samples
+    
+    
+    
+    def prepare_outputs(self, outputs:Union[list[dict], dict]) -> tuple[torch.Tensor, torch.Tensor]:
+        outputs = [f for f in outputs if f['labels'].numel() > 0]
+        logits = torch.stack([f['logits'] for f in outputs], 0)
+        labels = torch.stack([f['labels'] for f in outputs], 0)
 
-                    if len(selected_samples) > self.num_texts:
-                        break
-                
-                if len(selected_samples) > self.num_texts:
-                    break
-
-            outputs = selected_samples
-
-        logits, labels = clean_zero_in_labels(outputs=outputs, pad_token_id=self.cfg.tokenizer.pad_token_id)
-                    
+        labels = torch.where(labels == -100, torch.tensor(self.cfg.tokenizer.pad_token_id, device=labels.device), labels)
         return logits, labels
     
     
-    def _text_metric_compute(self, pl_module, name:str) -> None:
-        decode_logits, decode_labels = self._decode_text(pl_module=pl_module, name=name, sample=False)
+    def get_outputs(self, outputs, sample:bool) -> tuple:
+        outputs = self.sampling(outputs=outputs) if sample else outputs
+        logits, labels = self.prepare_outputs(outputs=outputs)    
+        return logits, labels
+    
+    
+    def get_texts(self, outputs, sample):
+        logits, labels = self.get_outputs(outputs=outputs, sample=sample)
+        decode_logits, decode_labels = self.decode_text(logits, labels)
+        return decode_logits, decode_labels
+        
+    
+    def text_metric_compute(self, pl_module, outputs, name:str) -> None:
+        decode_logits, decode_labels = self.get_texts(outputs=outputs, sample=False)
         pl_module._log_step(decode_logits, decode_labels, name=name)
 
 
-    def _log_sample_text(self, trainer, pl_module, name:str):
-        decode_logits, decode_labels = self._decode_text(pl_module=pl_module, name=name, sample=True)
+    def log_sample_text(self, trainer, outputs, name:str):
+        decode_logits, decode_labels = self.get_texts(outputs=outputs, sample=True)
         self._log_text(decode_logits=decode_logits, decode_labels=decode_labels, trainer=trainer, name=name)
+        
     
     
-    
-    def _log_text(self, decode_logits:list[str], decode_labels:list[str], trainer, name) -> None:
-        loggers = trainer.logger
-        if not isinstance(loggers, list):
-            loggers = [loggers]
+    def log_text(self, decode_logits:list[str], decode_labels:list[str], trainer, name) -> None:
+        pass
+
             
 
-        for i, (text, target) in enumerate(zip(decode_logits, decode_labels)):
-            msg = f'GENERATE | {text}\nTARGET | {target}'
+    
+    @rank_zero_only
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self.text_metric_compute(pl_module, outputs, name='TRAIN')
+        if (batch_idx + 1) % self.num_step_to_log == 0:
+            self.log_sample_text(trainer, outputs, name='TRAIN')
 
-            for logger in loggers:
-                logger_str = str(type(logger))
+    
+    @rank_zero_only
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
+        self.text_metric_compute(pl_module, outputs, name='VALID')
+        if (batch_idx + 1) % self.num_step_to_log == 0:
+            self.log_sample_text(trainer, outputs, name='VALID')
 
-                if 'TensorBoardLogger' in logger_str:
-                    logger.experiment.add_text(f'{name}_text_epoch_{trainer.current_epoch}', msg, global_step=trainer.global_step)
-                
-                elif 'CometLogger' in logger_str:
-                    logger.experiment.log_text(msg, step=trainer.global_step, metadata={'epoch':trainer.current_epoch, 'name':name})
-
-                elif 'WandbLogger' in logger_str:
-                    self.wandb_table.append([trainer.current_epoch, trainer.global_step, text, target])
-
-                    if i == len(decode_logits) - 1:
-                        logger.log_text(key=f'{name}_texts', columns=self.wandb_colums, data=self.wandb_table)
-                        
-                        self.wandb_table = []
-            
-
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if getattr(trainer, "sanity_checking", False):
-            return
-
-        try:
-            self._text_metric_compute(pl_module, 'VALID')
-            self._log_sample_text(trainer=trainer, pl_module=pl_module, name='VALID')
-        finally:
-            pl_module.valid_outputs.clear()
-            torch.cuda.empty_cache()
-            gc.collect()
-        
-
-
-    def on_test_epoch_end(self, trainer, pl_module):
-        if getattr(trainer, "sanity_checking", False):
-            return
-        
-        try:
-            self._text_metric_compute(pl_module, 'TEST')
-            self._log_sample_text(trainer=trainer, pl_module=pl_module, name='TEST')
-        finally:
-            pl_module.valid_outputs.clear()
-            torch.cuda.empty_cache()
-            gc.collect()
+    
+    @rank_zero_only
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
+        self.text_metric_compute(pl_module, outputs, name='TEST')
+        if (batch_idx + 1) % self.num_step_to_log == 0:
+            self.log_sample_text(trainer, outputs, name='TEST')
 
