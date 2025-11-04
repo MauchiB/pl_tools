@@ -5,93 +5,53 @@ import gc
 from typing import Union
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
-
-
-
-class VisualizationConsoleCallback(pl.Callback):
-    def __init__(self, cfg):
+class BaseCallback(pl.Callback):
+    def __init__(self, num_obj):
         super().__init__()
+        self.num_obj = num_obj
 
-        self.cfg = cfg
+    def sampling(self, outputs):
+        column = list(outputs.keys())[0]
+        random_numbers = random.sample(range(outputs[column].size(0)), self.num_obj)
+        for k,v in outputs.items():
+            if v.numel() > self.num_obj:
+                outputs[k] = v[random_numbers]
 
-
-    def _get_metric_dict(self, trainer, name):
-        metric_dict = {}
-
-        metric_dict[f'LOSS'] = trainer.callback_metrics[f'{name}_loss']
-
-        for name_metric, metric in self.cfg.metrics_dict.items():
-            if getattr(metric, 'requires_text', False):
-                continue
-
-            mean_metric = trainer.callback_metrics[f'{name}_{name_metric}']
-            metric_dict[name_metric] = mean_metric
-
-        return metric_dict
-
-
-    def _printing(self, trainer, pl_module, name):
-        metric_dict = self._get_metric_dict(trainer=trainer, pl_module=pl_module, name=name)
-
-        metric_str = ' '.join([f'{n} - {v} | ' for n, v in metric_dict.items()])
-        output_str =  f'{name} | ' + metric_str
-
-        print(output_str)
-
+        return outputs
     
-    def on_train_epoch_end(self, trainer, pl_module):
-        if getattr(trainer, "sanity_checking", False):
-            return  # пропускаем печать во время sanity check
-        self._printing(trainer=trainer, pl_module=pl_module, name='TRAIN')
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if getattr(trainer, "sanity_checking", False):
-            return  # пропускаем печать во время sanity check
-        self._printing(trainer=trainer, pl_module=pl_module, name='VALID')
-
-    def on_test_epoch_end(self, trainer, pl_module):
-        if getattr(trainer, "sanity_checking", False):
-            return  # пропускаем печать во время sanity check
-        self._printing(trainer=trainer, pl_module=pl_module, name='TEST')
+    def switch_device(self, outputs):
+        for k,v in outputs.items():
+            outputs[k] = v.cpu()
+        return outputs
+    
 
 
+class VisualizationTextCallback(BaseCallback):
+    def __init__(self, tokenizer, num_step_to_log=100, num_obj=3):
+        super().__init__(num_obj)
 
-
-
-
-class VisualizationTextCallback(pl.Callback):
-    def __init__(self, cfg, num_step_to_log=100, num_texts=3):
-        super().__init__()
-
-        self.cfg = cfg
+        self.tokenizer = tokenizer
         self.num_step_to_log = num_step_to_log
-        self.num_texts = num_texts
+        self.num_texts = num_obj
 
 
 
     def decode_text(self, outputs) -> tuple[list[str], list[str]]:
-        decode_logits = self.cfg.tokenizer.batch_decode(outputs['logits'], skip_special_tokens=True)
-        decode_labels = self.cfg.tokenizer.batch_decode(outputs['labels'], skip_special_tokens=True)
+        decode_logits = self.tokenizer.batch_decode(outputs['outputs'], skip_special_tokens=True)
+        decode_labels = self.tokenizer.batch_decode(outputs['labels'], skip_special_tokens=True)
         return decode_logits, decode_labels
     
-
-
-    def sampling(self, outputs):
-        random_numbers = random.sample(range(outputs['labels'].size(0)), self.num_texts)
-        outputs['logits'] = torch.stack([outputs['logits'][i] for i in random_numbers])
-        outputs['labels'] = torch.stack([outputs['labels'][i] for i in random_numbers])
-        return outputs
     
     
     
     def prepare_outputs(self, outputs:Union[list[dict], dict]) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = outputs['logits'].argmax(-1)
+        logits = outputs['outputs'].argmax(-1)
         labels = torch.where(outputs['labels'] == -100,
-                             torch.tensor(self.cfg.tokenizer.pad_token_id, device=outputs['labels'].device),
+                             torch.tensor(self.tokenizer.pad_token_id, device=outputs['labels'].device),
                              outputs['labels'])
         
         outputs['labels'] = labels
-        outputs['logits'] = logits
+        outputs['outputs'] = logits
         return outputs
     
     
@@ -119,28 +79,69 @@ class VisualizationTextCallback(pl.Callback):
     
     
     def log_text(self, decode_logits:list[str], decode_labels:list[str], trainer, name) -> None:
-        pass
+        raise ValueError('log_text wasn`t determined')
 
-            
+
+    def _log(self, pl_module, trainer, outputs, name):
+        self.text_metric_compute(pl_module, outputs, name=name)
+        if (trainer.global_step + 1) % self.num_step_to_log == 0:
+            self.log_sample_text(trainer, outputs, name=name)
+        
 
     
     @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        self.text_metric_compute(pl_module, outputs, name='TRAIN')
-        if (batch_idx + 1) % self.num_step_to_log == 0:
-            self.log_sample_text(trainer, outputs, name='TRAIN')
+        self._log(pl_module=pl_module, trainer=trainer, outputs=outputs, name='TRAIN')
 
     
     @rank_zero_only
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        self.text_metric_compute(pl_module, outputs, name='VALID')
-        if (batch_idx + 1) % self.num_step_to_log == 0:
-            self.log_sample_text(trainer, outputs, name='VALID')
+        self._log(pl_module=pl_module, trainer=trainer, outputs=outputs, name='VALID')
 
     
     @rank_zero_only
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        self.text_metric_compute(pl_module, outputs, name='TEST')
-        if (batch_idx + 1) % self.num_step_to_log == 0:
-            self.log_sample_text(trainer, outputs, name='TEST')
+        self._log(pl_module=pl_module, trainer=trainer, outputs=outputs, name='TEST')
+
+
+
+
+
+
+class VisualizationImageCallback(BaseCallback):
+    def __init__(self, num_step_to_log=100, num_obj=3):
+        super().__init__(num_obj)
+
+
+    def switch_device(self, outputs):
+        for k,v in outputs.items():
+            outputs[k] = v.cpu()
+        return outputs
+
+    
+    def prepare_images(self, batch, outputs):
+        common = {**batch, **outputs}
+        outputs = self.switch_device(common)
+        outputs = self.sampling(outputs)
+        return outputs
+
+    def log_image(self, outputs, trainer, name):
+        pass
+
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        outputs = self.prepare_images(batch, outputs)
+        self.log_image(outputs, trainer, 'TRAIN')
+
+    
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
+        outputs = self.prepare_images(batch, outputs)
+        self.log_image(outputs, trainer, 'VALID')
+    
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
+        outputs = self.prepare_images(batch, outputs)
+        self.log_image(outputs, trainer, 'TEST')
+    
+
 

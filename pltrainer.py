@@ -7,7 +7,6 @@ import inspect
 class Config:
     def __init__(self, 
                 model, 
-                tokenizer,
                 optimizer_dict:Dict,
                 loss_fn: Any = None,
                 metrics_dict:Dict={},
@@ -19,23 +18,15 @@ class Config:
         super().__init__()
 
         self.model = model
-        self.tokenizer = tokenizer
         self.freeze = freeze
         self.label_names = label_names
         self.loss_fn = loss_fn
         self.optimizer_dict = optimizer_dict
         self.metrics_dict = metrics_dict
         self.input_names=input_names
-
-
-        self._requires_text()
-
-    def _requires_text(self):
-        if any([i.requires_text for i in self.metrics_dict.values()]):
-            self.requires_text = True
             
             
-    
+
     
 
 
@@ -137,7 +128,7 @@ class CustomModel(pl.LightningModule):
     
 
 
-    def get_logits(self, outputs:Any):
+    def get_outputs(self, outputs:Any):
 
         if hasattr(outputs, 'logits'):
             logits = outputs.logits
@@ -185,27 +176,27 @@ class CustomModel(pl.LightningModule):
           
         outputs = self(param)
 
-        logits = self.get_logits(outputs)
+        outputs = self.get_outputs(outputs)
 
-        loss = self.get_loss(outputs=outputs, logits=logits, labels=labels)
+        loss = self.get_loss(outputs=outputs, logits=outputs, labels=labels)
             
         self._log_step(outputs=outputs, labels=labels, name=name, loss=loss)
 
-        return loss, logits, labels
+        return loss, outputs, labels
     
 
 
     def training_step(self, batch, batch_idx):
-        loss, logits, labels = self._step(batch, name='TRAIN', batch_idx=batch_idx)
-        return {'loss':loss, 'logits':logits, 'labels':labels}
+        loss, outputs, labels = self._step(batch, name='TRAIN', batch_idx=batch_idx)
+        return {'loss':loss, 'outputs':outputs, 'labels':labels}
 
     def validation_step(self, batch, batch_idx):
-        loss, logits, labels = self._step(batch, name='VALID', batch_idx=batch_idx)
-        return {'loss':loss, 'logits':logits, 'labels':labels}
+        loss, outputs, labels = self._step(batch, name='VALID', batch_idx=batch_idx)
+        return {'loss':loss, 'outputs':outputs, 'labels':labels}
 
     def test_step(self, batch, batch_idx):
-        loss, logits, labels = self._step(batch, name='TEST', batch_idx=batch_idx)
-        return {'loss':loss, 'logits':logits, 'labels':labels}
+        loss, outputs, labels = self._step(batch, name='TEST', batch_idx=batch_idx)
+        return {'loss':loss, 'outputs':outputs, 'labels':labels}
 
     def predict_step(self, batch, batch_idx):
         pass

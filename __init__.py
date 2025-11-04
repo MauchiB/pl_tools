@@ -1,2 +1,2 @@
 from .pltrainer import Config, CustomModel
-from .utils import VisualizationTextCallback, VisualizationConsoleCallback
+from .utils import VisualizationTextCallback, VisualizationImageCallback
