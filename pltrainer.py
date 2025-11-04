@@ -98,15 +98,15 @@ class CustomModel(pl.LightningModule):
             
 
     def _log_step(self, 
-                  loss, 
                   outputs:list[Union[str, torch.Tensor]],
                   labels:list[Union[str, torch.Tensor]],
-                  name:str) -> None:
+                  name:str,
+                  loss=None) -> None:
         
         is_str = isinstance(outputs[0], str)
         metric_dict = self._get_metrics_dict(name=name)
-
-        self.log(f'{name}_loss', loss, on_epoch=True)
+        
+        if loss: self.log(f'{name}_loss', loss, on_epoch=True)
 
         for name_metric, metric in metric_dict.items():
             if getattr(metric, 'requires_text', False):
@@ -129,6 +129,9 @@ class CustomModel(pl.LightningModule):
 
         param = {k:v for k,v in batch.items() if k in annot_keys}
         labels = {k:v for k,v in batch.items() if k in self.cfg.label_names}
+
+        if len(labels) == 1:
+            labels = labels[self.cfg.label_names[0]]
 
         return param, labels
     
@@ -156,13 +159,10 @@ class CustomModel(pl.LightningModule):
     
 
     def get_loss(self, outputs, logits, labels):
-        if hasattr(outputs, 'loss'):
+        if hasattr(outputs, 'loss') and outputs.loss is not None:
             loss = outputs.loss
 
-            if loss is None:
-                raise ValueError(f'outputs.logits return {type(loss)} / type of outputs is {type(outputs)}')
-
-        elif hasattr(self.cfg, 'loss_fn'):
+        elif self.cfg.loss_fn:
             loss = self.cfg.loss_fn(logits, labels)
 
             if loss is None:
@@ -171,7 +171,6 @@ class CustomModel(pl.LightningModule):
         else:
             raise ValueError(f'model didn`t return loss and cfg.loss_fn is None')
         
-
         return loss
         
 
@@ -193,6 +192,7 @@ class CustomModel(pl.LightningModule):
         self._log_step(outputs=outputs, labels=labels, name=name, loss=loss)
 
         return loss, logits, labels
+    
 
 
     def training_step(self, batch, batch_idx):

@@ -69,37 +69,41 @@ class VisualizationTextCallback(pl.Callback):
 
 
 
-    def decode_text(self, logits, labels) -> tuple[list[str], list[str]]:
-        decode_logits = self.cfg.tokenizer.batch_decode(logits, skip_special_tokens=True)
-        decode_labels = self.cfg.tokenizer.batch_decode(labels, skip_special_tokens=True)
+    def decode_text(self, outputs) -> tuple[list[str], list[str]]:
+        decode_logits = self.cfg.tokenizer.batch_decode(outputs['logits'], skip_special_tokens=True)
+        decode_labels = self.cfg.tokenizer.batch_decode(outputs['labels'], skip_special_tokens=True)
         return decode_logits, decode_labels
     
 
 
     def sampling(self, outputs):
-        selected_samples = random.sample(outputs, self.num_texts)
-        return selected_samples
+        random_numbers = random.sample(range(outputs['labels'].size(0)), self.num_texts)
+        outputs['logits'] = torch.stack([outputs['logits'][i] for i in random_numbers])
+        outputs['labels'] = torch.stack([outputs['labels'][i] for i in random_numbers])
+        return outputs
     
     
     
     def prepare_outputs(self, outputs:Union[list[dict], dict]) -> tuple[torch.Tensor, torch.Tensor]:
-        outputs = [f for f in outputs if f['labels'].numel() > 0]
-        logits = torch.stack([f['logits'] for f in outputs], 0)
-        labels = torch.stack([f['labels'] for f in outputs], 0)
-
-        labels = torch.where(labels == -100, torch.tensor(self.cfg.tokenizer.pad_token_id, device=labels.device), labels)
-        return logits, labels
+        logits = outputs['logits'].argmax(-1)
+        labels = torch.where(outputs['labels'] == -100,
+                             torch.tensor(self.cfg.tokenizer.pad_token_id, device=outputs['labels'].device),
+                             outputs['labels'])
+        
+        outputs['labels'] = labels
+        outputs['logits'] = logits
+        return outputs
     
     
     def get_outputs(self, outputs, sample:bool) -> tuple:
         outputs = self.sampling(outputs=outputs) if sample else outputs
-        logits, labels = self.prepare_outputs(outputs=outputs)    
-        return logits, labels
+        outputs = self.prepare_outputs(outputs=outputs)    
+        return outputs
     
     
     def get_texts(self, outputs, sample):
-        logits, labels = self.get_outputs(outputs=outputs, sample=sample)
-        decode_logits, decode_labels = self.decode_text(logits, labels)
+        outputs = self.get_outputs(outputs=outputs, sample=sample)
+        decode_logits, decode_labels = self.decode_text(outputs)
         return decode_logits, decode_labels
         
     
@@ -110,8 +114,8 @@ class VisualizationTextCallback(pl.Callback):
 
     def log_sample_text(self, trainer, outputs, name:str):
         decode_logits, decode_labels = self.get_texts(outputs=outputs, sample=True)
-        self._log_text(decode_logits=decode_logits, decode_labels=decode_labels, trainer=trainer, name=name)
-        
+        self.log_text(decode_logits=decode_logits, decode_labels=decode_labels, trainer=trainer, name=name)
+    
     
     
     def log_text(self, decode_logits:list[str], decode_labels:list[str], trainer, name) -> None:
