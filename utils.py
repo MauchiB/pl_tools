@@ -2,33 +2,66 @@ import pytorch_lightning as pl
 import torch
 import random
 import gc
-from typing import Union
+from typing import Union, List, Dict
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from torchvision.utils import make_grid, save_image
+import os
 
 class BaseCallback(pl.Callback):
-    def __init__(self, num_obj):
+    def __init__(self, num_step_to_log, num_obj):
         super().__init__()
         self.num_obj = num_obj
+        self.num_step_to_log = num_step_to_log
 
-    def sampling(self, outputs):
-        column = list(outputs.keys())[0]
-        random_numbers = random.sample(range(outputs[column].size(0)), self.num_obj)
-        for k,v in outputs.items():
-            if v.numel() > self.num_obj:
-                outputs[k] = v[random_numbers]
 
-        return outputs
+    def _map_dicts(self, *dicts, func, **kwargs) -> List[Dict]:
+        results = []
+        for d in dicts:
+            results.append(func(outputs=d, **kwargs))
+        return results
+    
+    
+    def get_batch(self, outputs):
+        tensors = [v.size(0) for v in outputs.values() if isinstance(v, torch.Tensor) and v.dim() > 0]
+        if not tensors:
+            raise ValueError('No batched tensors (dim > 0) found in outputs')
+        batch_size = max(tensors)
+        return batch_size
+            
+            
+            
+
+    def sampling(self, outputs, seed:int):
+        
+        batch_size = self.get_batch(outputs=outputs)
+
+        if self.num_obj > batch_size:
+            raise ValueError('num_obj > batch_size')
+        
+        gen = torch.Generator()
+        if seed:
+            gen.manual_seed(seed)
+        
+        random_numbers = torch.randperm(batch_size, generator=gen)[:self.num_obj]
+
+        sampled_dict = {k:v[random_numbers] if isinstance(v, torch.Tensor) and v.dim() > 0 else v
+                        for k,v in outputs.items()}
+                
+        return sampled_dict
+        
     
     def switch_device(self, outputs):
-        for k,v in outputs.items():
-            outputs[k] = v.cpu()
-        return outputs
+        device_dict = {k:v.detach().cpu()
+                            for k,v in outputs.items()}
+        return device_dict
+    
+
     
 
 
 class VisualizationTextCallback(BaseCallback):
     def __init__(self, tokenizer, num_step_to_log=100, num_obj=3):
-        super().__init__(num_obj)
+        super().__init__(num_step_to_log, num_obj)
 
         self.tokenizer = tokenizer
         self.num_step_to_log = num_step_to_log
@@ -44,20 +77,20 @@ class VisualizationTextCallback(BaseCallback):
     
     
     
-    def prepare_outputs(self, outputs:Union[list[dict], dict]) -> tuple[torch.Tensor, torch.Tensor]:
+    def prepare_outputs(self, outputs) -> tuple[torch.Tensor, torch.Tensor]:
         logits = outputs['outputs'].argmax(-1)
         labels = torch.where(outputs['labels'] == -100,
                              torch.tensor(self.tokenizer.pad_token_id, device=outputs['labels'].device),
                              outputs['labels'])
-        
         outputs['labels'] = labels
         outputs['outputs'] = logits
         return outputs
     
     
     def get_outputs(self, outputs, sample:bool) -> tuple:
-        outputs = self.sampling(outputs=outputs) if sample else outputs
-        outputs = self.prepare_outputs(outputs=outputs)    
+        outputs = self.switch_device(outputs=outputs)
+        outputs = self.prepare_outputs(outputs=outputs)  
+        outputs = self.sampling(outputs=outputs) if sample else outputs  
         return outputs
     
     
@@ -78,30 +111,30 @@ class VisualizationTextCallback(BaseCallback):
     
     
     
-    def log_text(self, decode_logits:list[str], decode_labels:list[str], trainer, name) -> None:
+    def log_text(self, decode_logits:List[str], decode_labels:List[str], trainer, name) -> None:
         raise ValueError('log_text wasn`t determined')
 
 
     def _log(self, pl_module, trainer, outputs, name):
         self.text_metric_compute(pl_module, outputs, name=name)
-        if (trainer.global_step + 1) % self.num_step_to_log == 0:
+        if (trainer.global_step) % self.num_step_to_log == 0:
             self.log_sample_text(trainer, outputs, name=name)
         
 
     
     @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        self._log(pl_module=pl_module, trainer=trainer, outputs=outputs, name='TRAIN')
+        self._map_dicts(outputs, func=self._log, pl_module=pl_module, trainer=trainer, name='TRAIN')
 
     
     @rank_zero_only
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        self._log(pl_module=pl_module, trainer=trainer, outputs=outputs, name='VALID')
+        self._map_dicts(outputs, func=self._log, pl_module=pl_module, trainer=trainer, name='VALID')
 
     
     @rank_zero_only
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        self._log(pl_module=pl_module, trainer=trainer, outputs=outputs, name='TEST')
+        self._map_dicts(outputs, func=self._log, pl_module=pl_module, trainer=trainer, name='TEST')
 
 
 
@@ -109,39 +142,70 @@ class VisualizationTextCallback(BaseCallback):
 
 
 class VisualizationImageCallback(BaseCallback):
-    def __init__(self, num_step_to_log=100, num_obj=3):
-        super().__init__(num_obj)
+    def __init__(self, image_column, num_step_to_log=100, num_obj=3, folder_to_save=None):
+        super().__init__(num_step_to_log, num_obj)
+        self.image_column = image_column
+        self.folder_to_save = folder_to_save
 
 
-    def switch_device(self, outputs):
-        for k,v in outputs.items():
-            outputs[k] = v.cpu()
+
+    def prepare_outputs(self, outputs, seed):
+        outputs = self.switch_device(outputs)
+        outputs = self.sampling(outputs, seed=seed)
         return outputs
-
     
-    def prepare_images(self, batch, outputs):
-        common = {**batch, **outputs}
-        outputs = self.switch_device(common)
-        outputs = self.sampling(outputs)
-        return outputs
 
-    def log_image(self, outputs, trainer, name):
+    def make_image(self, batch, outputs, trainer, name):
+        return batch[self.image_column]
+
+
+    def annotate_image(self, image, batch, outputs, trainer, name):
+        return image
+        
+
+    def save_image(self, image):
+        if not os.path.exists(self.folder_to_save):
+            os.makedirs(self.folder_to_save, exist_ok=True)
+        save_image(image, self.folder_to_save)
+
+
+    def prepare_image(self, batch, outputs, trainer, name):
+        image = self.make_image(batch, outputs, trainer, name)
+        image = self.annotate_image(image, batch, outputs, trainer, name)
+        
+        if self.folder_to_save:
+            self.save_image(image=image)
+        
+        return image
+    
+        
+
+    def log_image(self, image, batch, outputs, trainer, name):
         pass
 
 
+    def _log_image(self, batch, outputs, trainer, name):
+        batch, outputs = self._map_dicts(batch, outputs, func=self.prepare_outputs, seed=trainer.global_step)
+        image = self.prepare_image(batch=batch, outputs=outputs, trainer=trainer, name=name)
+        self.log_image(image=image, batch=batch, outputs=outputs, trainer=trainer, name=name)
+        
+
+    @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        outputs = self.prepare_images(batch, outputs)
-        self.log_image(outputs, trainer, 'TRAIN')
+        if (trainer.global_step) % self.num_step_to_log == 0:
+            self._log_image(batch=batch, outputs=outputs, trainer=trainer, name='TRAIN')
 
-    
+
+    @rank_zero_only
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        outputs = self.prepare_images(batch, outputs)
-        self.log_image(outputs, trainer, 'VALID')
-    
+        if (trainer.global_step) % self.num_step_to_log == 0:
+            self._log_image(batch=batch, outputs=outputs, trainer=trainer, name='VALID')
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        outputs = self.prepare_images(batch, outputs)
-        self.log_image(outputs, trainer, 'TEST')
     
+    @rank_zero_only
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
+        if (trainer.global_step) % self.num_step_to_log == 0:
+            self._log_image(batch=batch, outputs=outputs, trainer=trainer, name='TEST')
+        
 
 
