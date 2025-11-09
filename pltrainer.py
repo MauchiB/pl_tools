@@ -12,7 +12,8 @@ class Config:
                 metrics_dict:Dict={},
                 freeze:Union[None, int, list, tuple]=None, 
                 label_names:List=['labels'],
-                input_names:List=None
+                input_names:List=None,
+                phases:Dict[str, str] = None
                 ):
         
         super().__init__()
@@ -24,10 +25,31 @@ class Config:
         self.optimizer_dict = optimizer_dict
         self.metrics_dict = metrics_dict
         self.input_names=input_names
-            
-            
+        self.phases = phases
 
-    
+
+        self.set_phases()
+
+
+    def set_phases(self):
+        base_phases = {
+        'TRAIN':'TRAINING',
+        'VALIDATION':'VALID',
+        'TEST':'TESTING',
+        'PREDICT':'PRED'
+        }
+
+        if self.phases:
+            for k,v in self.phases.items():
+                base_phases[k] = v
+
+        self.phases = base_phases
+
+        print(self.phases)
+            
+        
+            
+            
 
 
 
@@ -41,18 +63,33 @@ class CustomModel(pl.LightningModule):
         self.metrics_train = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
         self.metrics_valid = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
         self.metrics_test = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
+
+
+        self.phase = 'UNKNOWN'
+        self._phase = 'UNKNOWN'
     
 
         self.save_hyperparameters()
 
-        self.custom_freeze(self.model, freeze=cfg.freeze)
+        self.custom_freeze(self.model)
 
 
-    def custom_freeze(self, model, freeze):
+
+    def _set_phase(self, phase_key) -> str:
+        if phase_key in self.cfg.phases:
+            self.phase = self.cfg.phases[phase_key]
+            self._phase = phase_key
+            return
+        
+        raise ValueError('phase_key not in phases')
+
+
+
+    def custom_freeze(self, model):
         self.model.train()
         layer_counter = 0
         
-        if isinstance(freeze, int):
+        if isinstance(self.cfg.freeze, int):
             list_layers = list(model.named_parameters())[::-1]
         else:
             list_layers = list(model.named_parameters())
@@ -60,54 +97,60 @@ class CustomModel(pl.LightningModule):
 
         for name, param in list_layers:
 
-            if freeze == None:
+            if self.cfg.freeze == None:
                 param.requires_grad_(True)
 
-            elif isinstance(freeze, int):
+            elif isinstance(self.cfg.freeze, int):
                 is_bias = 'bias' in name.lower()
                 if not is_bias:
                     layer_counter += 1
-                param.requires_grad_(layer_counter < freeze)
+                param.requires_grad_(layer_counter < self.cfg.freeze)
 
-            elif isinstance(freeze, (list, tuple)):
-                param.requires_grad_(any(f in name.lower() for f in freeze))
+            elif isinstance(self.cfg.freeze, (list, tuple)):
+                param.requires_grad_(any(f in name.lower() for f in self.cfg.freeze))
 
             else:
-                raise ValueError(f'unsupported type for freeze: {type(freeze)}')
+                raise ValueError(f'unsupported type for freeze: {type(self.cfg.freeze)}')
             
 
-    def _get_metrics_dict(self, name:str) -> torch.nn.ModuleDict:
-        if name == 'TRAIN':
-            metric_dict = self.metrics_train
-        if name == 'VALID':
-            metric_dict = self.metrics_valid
-        if name == 'TEST':
-            metric_dict = self.metrics_test
+    def _get_metrics_dict(self) -> torch.nn.ModuleDict:
 
-        return metric_dict
+        if self._phase == 'TRAIN':
+            return self.metrics_train
+        
+        elif self._phase == 'VALIDATION':
+            return self.metrics_valid
+        
+        elif self._phase == 'TEST':
+            return self.metrics_test
+        
+        else:
+            return None
     
             
 
     def _log_step(self, 
                   outputs:list[Union[str, torch.Tensor]],
                   labels:list[Union[str, torch.Tensor]],
-                  name:str,
                   loss=None) -> None:
         
         is_str = isinstance(outputs[0], str)
-        metric_dict = self._get_metrics_dict(name=name)
+        metric_dict = self._get_metrics_dict()
         
-        if loss: self.log(f'{name}_loss', loss, on_epoch=True)
+        if loss: self.log(f'{self.phase}_loss', loss, on_epoch=True)
 
-        for name_metric, metric in metric_dict.items():
-            if getattr(metric, 'requires_text', False):
-                if not is_str:
-                    continue
-    
-            metric.update(outputs if is_str else outputs.argmax(-1),
-                          labels)
-            
-            self.log(f'{name}_{name_metric}', metric, on_epoch=True)
+
+        if metric_dict:
+
+            for name_metric, metric in metric_dict.items():
+                if getattr(metric, 'requires_text', False):
+                    if not is_str:
+                        continue
+        
+                metric.update(outputs if is_str else outputs.argmax(-1),
+                            labels)
+                
+                self.log(f'{self.phase}_{name_metric}', metric, on_epoch=True)
 
 
 
@@ -171,7 +214,7 @@ class CustomModel(pl.LightningModule):
         return x
     
 
-    def _step(self, batch, name:str, batch_idx:int):
+    def _step(self, batch):
         param, labels = self.get_param(batch)
           
         outputs = self(param)
@@ -180,22 +223,22 @@ class CustomModel(pl.LightningModule):
 
         loss = self.get_loss(outputs=outputs, logits=outputs, labels=labels)
             
-        self._log_step(outputs=outputs, labels=labels, name=name, loss=loss)
+        self._log_step(outputs=outputs, labels=labels, loss=loss)
 
         return loss, outputs, labels
     
 
 
     def training_step(self, batch, batch_idx):
-        loss, outputs, labels = self._step(batch, name='TRAIN', batch_idx=batch_idx)
+        loss, outputs, labels = self._step(batch)
         return {'loss':loss, 'outputs':outputs, 'labels':labels}
 
     def validation_step(self, batch, batch_idx):
-        loss, outputs, labels = self._step(batch, name='VALID', batch_idx=batch_idx)
+        loss, outputs, labels = self._step(batch)
         return {'loss':loss, 'outputs':outputs, 'labels':labels}
 
     def test_step(self, batch, batch_idx):
-        loss, outputs, labels = self._step(batch, name='TEST', batch_idx=batch_idx)
+        loss, outputs, labels = self._step(batch)
         return {'loss':loss, 'outputs':outputs, 'labels':labels}
 
     def predict_step(self, batch, batch_idx):
@@ -203,3 +246,16 @@ class CustomModel(pl.LightningModule):
     
     def configure_optimizers(self):
         return self.cfg.optimizer_dict
+    
+
+
+    def on_train_epoch_start(self):
+        self._set_phase(phase_key='TRAIN')
+
+
+    def on_validation_epoch_start(self):
+        self._set_phase(phase_key='VALIDATION')
+
+
+    def on_test_epoch_start(self):
+        self._set_phase(phase_key='TEST')
