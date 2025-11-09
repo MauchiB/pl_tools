@@ -60,9 +60,18 @@ class CustomModel(pl.LightningModule):
         self.cfg = cfg
         self.model = cfg.model
 
-        self.metrics_train = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
-        self.metrics_valid = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
-        self.metrics_test = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
+
+
+        self._train_metirc_dict = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
+        self._valid_metirc_dict = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
+        self._test_metirc_dict = torch.nn.ModuleDict({k:v.clone() for k, v in cfg.metrics_dict.items()})
+
+
+        self._metrics_dict = {
+            'TRAIN':self._train_metirc_dict,
+            'VALIDATION':self._valid_metirc_dict,
+            'TEST':self._test_metirc_dict
+        }
 
 
         self.phase = 'UNKNOWN'
@@ -76,12 +85,8 @@ class CustomModel(pl.LightningModule):
 
 
     def _set_phase(self, phase_key) -> str:
-        if phase_key in self.cfg.phases:
-            self.phase = self.cfg.phases[phase_key]
-            self._phase = phase_key
-            return
-        
-        raise ValueError('phase_key not in phases')
+        self.phase = self.cfg.phases[phase_key]
+        self._phase = phase_key
 
 
 
@@ -112,22 +117,12 @@ class CustomModel(pl.LightningModule):
             else:
                 raise ValueError(f'unsupported type for freeze: {type(self.cfg.freeze)}')
             
-
-    def _get_metrics_dict(self) -> torch.nn.ModuleDict:
-
-        if self._phase == 'TRAIN':
-            return self.metrics_train
-        
-        elif self._phase == 'VALIDATION':
-            return self.metrics_valid
-        
-        elif self._phase == 'TEST':
-            return self.metrics_test
-        
-        else:
-            return None
     
-            
+    @property
+    def _get_metrics_dict(self) -> torch.nn.ModuleDict:
+        return self._metrics_dict[self._phase]
+
+    
 
     def _log_step(self, 
                   outputs:list[Union[str, torch.Tensor]],
@@ -135,9 +130,9 @@ class CustomModel(pl.LightningModule):
                   loss=None) -> None:
         
         is_str = isinstance(outputs[0], str)
-        metric_dict = self._get_metrics_dict()
+        metric_dict = self._get_metrics_dict
         
-        if loss: self.log(f'{self.phase}_loss', loss, on_epoch=True)
+        if loss: self.log(f'{self.phase}_loss', loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
 
 
         if metric_dict:
@@ -150,7 +145,7 @@ class CustomModel(pl.LightningModule):
                 metric.update(outputs if is_str else outputs.argmax(-1),
                             labels)
                 
-                self.log(f'{self.phase}_{name_metric}', metric, on_epoch=True)
+                self.log(f'{self.phase}_{name_metric}', metric, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
 
 
 

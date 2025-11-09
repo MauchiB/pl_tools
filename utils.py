@@ -4,18 +4,22 @@ from typing import Union, List, Dict
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from torchvision.utils import make_grid, save_image
 import os
-import inspect
+from abc import abstractmethod, ABC
 
-class BaseCallback(pl.Callback):
+class BaseCallback(pl.Callback, ABC):
     def __init__(self, num_step_to_log:int, num_obj:int) -> None:
         super().__init__()
         self.num_obj = num_obj
         self.num_step_to_log = num_step_to_log
 
 
-        self._val_step = 0
-        self._test_step = 0
-        self._pred_step = 0
+        self.step_dict = {
+            'TRAIN':0,
+            'VALIDATION':0,
+            'TEST':0,
+            'PREDICT':0
+        }
+
 
 
 
@@ -66,34 +70,21 @@ class BaseCallback(pl.Callback):
         return device_dict
     
 
-    def _set_step(self) -> int:
+    def _add_step(self) -> int:
         if not self._trainer.sanity_checking:
-            if self._phase == 'VALIDATION':
-                self._val_step += 1
+            self.step_dict[self._phase] += 1
 
-            if self._phase == 'TEST':
-                self._test_step += 1
 
-            if self._phase == 'PREDICT':
-                self._pred_step += 1
-        
     @property
     def _step(self):
-        if self._phase == 'TRAIN':
-            return self._trainer.global_step
-        if self._phase == 'VALIDATION':
-            return self._val_step
-        if self._phase == 'TEST':
-            return self._test_step
-        if self._phase == 'PREDICT':
-            return self._pred_step
-        
+        return self.step_dict[self._phase]
+    
     
     
     def _setuping(self):
         self.phase = self._pl_module.phase
         self._phase = self._pl_module._phase
-        self._set_step()
+        self._add_step()
         
 
     def setup(self, trainer, pl_module, stage):
@@ -170,9 +161,9 @@ class VisualizationTextCallback(BaseCallback):
         self.log_text(decode_logits=decode_logits, decode_labels=decode_labels)
     
     
+    @abstractmethod
     def log_text(self, decode_logits:List[str], decode_labels:List[str]) -> None:
-        '''use self.logger for getting logger'''
-        raise ValueError('log_text wasn`t determined')
+        pass
 
 
     def _log(self, outputs):
@@ -211,7 +202,7 @@ class VisualizationTextCallback(BaseCallback):
 
 
 
-class VisualizationImageCallback(BaseCallback):
+class VisualizationImageCallback(BaseCallback, ABC):
     def __init__(self, image_column, num_step_to_log:int=100, num_obj:int=3, folder_to_save:str=None):
         super().__init__(num_step_to_log, num_obj)
 
@@ -227,6 +218,14 @@ class VisualizationImageCallback(BaseCallback):
     
 
     def make_image(self, batch, outputs:Dict):
+        image = batch.get(self.image_column, None)
+
+        if not image:
+            raise KeyError(f'{self.image_column} not found in batch')
+        
+        if not isinstance(image, torch.Tensor):
+            raise ValueError(f'expected tensor, got {type(image)}')
+        
         return make_grid(batch[self.image_column])
 
 
@@ -237,7 +236,7 @@ class VisualizationImageCallback(BaseCallback):
     def save_image(self, image):
         if not os.path.exists(self.folder_to_save):
             os.makedirs(self.folder_to_save, exist_ok=True)
-        path = os.path.join(self.folder_to_save, f'{self.phase}_step_{self.step}.jpg')
+        path = os.path.join(self.folder_to_save, f'{self.phase}_step_{self._step}.jpg')
         save_image(image, path)
 
 
@@ -251,7 +250,7 @@ class VisualizationImageCallback(BaseCallback):
         return image
     
         
-
+    @abstractmethod
     def log_image(self, image, batch:Dict, outputs:Dict):
         pass
 
