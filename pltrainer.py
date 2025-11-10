@@ -45,7 +45,6 @@ class Config:
 
         self.phases = base_phases
 
-        print(self.phases)
             
         
             

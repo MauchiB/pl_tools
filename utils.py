@@ -6,12 +6,28 @@ from torchvision.utils import make_grid, save_image
 import os
 from abc import abstractmethod, ABC
 
-class BaseCallback(pl.Callback, ABC):
-    def __init__(self, num_step_to_log:int, num_obj:int) -> None:
-        super().__init__()
-        self.num_obj = num_obj
-        self.num_step_to_log = num_step_to_log
 
+class CallbackConfig:
+    def __init__(
+                 self,
+                 num_step_to_log:Union[int, float] = 0.50,
+                 num_obj:int = 3
+                 ):
+        
+        self.num_step_to_log = num_step_to_log
+        self.num_obj = num_obj
+
+
+
+
+
+
+
+class BaseCallback(pl.Callback, ABC):
+    def __init__(self, cfg) -> None:
+        super().__init__()
+
+        self.cfg = cfg
 
         self.step_dict = {
             'TRAIN':0,
@@ -21,6 +37,27 @@ class BaseCallback(pl.Callback, ABC):
         }
 
 
+
+    def _use_log(self) -> bool:
+        if isinstance(self.cfg.num_step_to_log, int):
+            if (self._step) % self.cfg.num_step_to_log == 0:
+                return True
+        
+        elif isinstance(self.cfg.num_step_to_log, float):
+            if not (0 < self.cfg.num_step_to_log <= 1):
+                raise ValueError('num_obj as float must be between 0 and 1')
+            
+
+            steps_dataloader = len(self._get_dataloader())
+            step_log = max(1, int(steps_dataloader * self.cfg.num_step_to_log))
+
+            return (self._step % step_log == 0)
+        
+        else:
+            ValueError('num_obj must be float or int')
+            
+            
+            
 
 
     def _map_dicts(self, *dicts, func, **kwargs) -> List[Dict]:
@@ -36,21 +73,33 @@ class BaseCallback(pl.Callback, ABC):
             raise ValueError('No batched tensors (dim > 0) found in outputs')
         batch_size = max(tensors)
         return batch_size
+    
+
+
+    def _get_dataloader(self):
+        if self._phase == 'TRAIN' and self._trainer.train_dataloader:
+            return self._trainer.train_dataloader
+        elif self._phase == 'VALIDATION' and self._trainer.val_dataloaders:
+            return self._trainer.val_dataloaders
+        elif self._phase == 'TEST' and self._trainer.test_dataloaders:
+            return self._trainer.test_dataloaders
+        else:
+            raise KeyError('no one of dataloaders was found')
             
-            
+
             
 
     def sampling(self, outputs:Dict) -> Dict:
         
         batch_size = self.get_batch(outputs=outputs)
 
-        if self.num_obj > batch_size:
+        if self.cfg.num_obj > batch_size:
             raise ValueError('num_obj > batch_size')
         
         gen = torch.Generator()
         gen.manual_seed(self._step)
         
-        random_numbers = torch.randperm(batch_size, generator=gen)[:self.num_obj]
+        random_numbers = torch.randperm(batch_size, generator=gen)[:self.cfg.num_obj]
 
         sampled_dict = {k:v[random_numbers] if isinstance(v, torch.Tensor) and v.dim() > 0 else v
                         for k,v in outputs.items()}
@@ -79,14 +128,17 @@ class BaseCallback(pl.Callback, ABC):
     def _step(self):
         return self.step_dict[self._phase]
     
+
+    def _clear_step(self):
+        self.step_dict[self._phase] = 0
+    
     
     
     def _setuping(self):
         self.phase = self._pl_module.phase
         self._phase = self._pl_module._phase
-        self._add_step()
-        
 
+        
     def setup(self, trainer, pl_module, stage):
         self.device = next(pl_module.parameters()).device
         self._trainer = trainer
@@ -97,25 +149,42 @@ class BaseCallback(pl.Callback, ABC):
     
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         self._setuping()
+        self._add_step()
 
 
     def on_validation_batch_start(self, trainer, pl_module, batch, batch_idx):
         self._setuping()
+        self._add_step()
 
 
     def on_test_batch_start(self, trainer, pl_module, batch, batch_idx):
         self._setuping()
+        self._add_step()
+
+
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        self._phase = 'TRAIN'
+        self._clear_step()
+
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        self._phase = 'VALIDATION'
+        self._clear_step()
+
+
+    def on_test_epoch_end(self, trainer, pl_module):
+        self._phase = 'TEST'
+        self._clear_step()
 
 
 
 
 class VisualizationTextCallback(BaseCallback):
-    def __init__(self, tokenizer, num_step_to_log:int=100, num_obj:int=3):
-        super().__init__(num_step_to_log, num_obj)
+    def __init__(self, tokenizer, cfg):
+        super().__init__(cfg)
 
         self.tokenizer = tokenizer
-        self.num_step_to_log = num_step_to_log
-        self.num_texts = num_obj
 
 
 
@@ -168,7 +237,7 @@ class VisualizationTextCallback(BaseCallback):
 
     def _log(self, outputs):
         self.text_metric_compute(outputs)
-        if (self._step) % self.num_step_to_log == 0:
+        if self._use_log():
             self.log_sample_text(outputs)
 
 
@@ -203,8 +272,8 @@ class VisualizationTextCallback(BaseCallback):
 
 
 class VisualizationImageCallback(BaseCallback, ABC):
-    def __init__(self, image_column, num_step_to_log:int=100, num_obj:int=3, folder_to_save:str=None):
-        super().__init__(num_step_to_log, num_obj)
+    def __init__(self, image_column, cfg, folder_to_save:str=None):
+        super().__init__(cfg)
 
         self.image_column = image_column
         self.folder_to_save = folder_to_save
@@ -264,22 +333,17 @@ class VisualizationImageCallback(BaseCallback, ABC):
 
     @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if (self._step) % self.num_step_to_log == 0:
+        if self._use_log():
             self._log_image(batch=batch, outputs=outputs)
 
 
     @rank_zero_only
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        if (self._step) % self.num_step_to_log == 0:
+        if self._use_log():
             self._log_image(batch=batch, outputs=outputs)
 
     
     @rank_zero_only
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx = 0):
-        if (self._step) % self.num_step_to_log == 0:
+        if self._use_log():
             self._log_image(batch=batch, outputs=outputs)
-
-
-        
-
-
